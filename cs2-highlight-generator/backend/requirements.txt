@@ -1,0 +1,25 @@
+# Python dependencies for CS2 Highlight Generator Backend
+# Install with: pip install -r requirements.txt
+
+# Web framework (similar to Spring Boot in Java)
+fastapi==0.104.1
+uvicorn[standard]==0.24.0  # ASGI server (like Tomcat for Java)
+
+# CS2 Demo parsing library (no Java equivalent exists)
+awpy==1.3.1
+
+# File handling and utilities
+python-multipart==0.0.6  # For file uploads
+aiofiles==23.2.1  # Async file operations
+
+# Data validation (similar to Java Bean Validation)
+pydantic==2.5.0
+
+# JSON handling
+orjson==3.9.10  # Faster JSON parsing
+
+# CORS middleware (for frontend communication)
+python-cors==1.0.0
+
+# Type checking (optional but recommended)
+mypy==1.7.1
