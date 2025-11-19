@@ -1,11 +1,11 @@
 """
 FaceIt Demo Parser Service
-Specialized service for parsing FaceIt CS2 demos using demoparser2 directly
+Specialized service for parsing FaceIt CS2 demos using awpy without round parsing
 
 FaceIt servers use custom configurations and don't emit standard events like
 'round_officially_ended', which breaks awpy's round parsing. This service
-uses demoparser2 (the underlying parser) directly to extract kill events
-without relying on round parsing.
+uses awpy's parse_events() method to extract kill events directly without
+relying on round parsing.
 """
 
 import logging
@@ -13,8 +13,10 @@ from pathlib import Path
 from typing import Dict, List, Any
 import time
 
-# Use demoparser2 directly instead of awpy to bypass round parsing issues
-from demoparser2 import DemoParser
+# Use awpy but bypass the full parse() method that requires rounds
+from awpy import Demo
+import awpy.parsers.utils
+import awpy.parsers.events
 
 from models import MatchInfo, PlayerStats
 
@@ -23,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 class FaceItDemoParserService:
     """
-    Specialized parser for FaceIt demos using demoparser2 directly
+    Specialized parser for FaceIt demos using awpy's parse_events()
 
     In Java:
     @Service
@@ -34,13 +36,13 @@ class FaceItDemoParserService:
 
     def __init__(self):
         """Constructor"""
-        logger.info("FaceItDemoParserService initialized (using demoparser2 directly)")
+        logger.info("FaceItDemoParserService initialized (using awpy.parse_events)")
 
     def parse_faceit_demo(self, demo_file_path: Path) -> Dict[str, Any]:
         """
-        Parse a FaceIt CS2 demo file using demoparser2 directly
+        Parse a FaceIt CS2 demo file using awpy's parse_events() method
 
-        This bypasses awpy's round parsing which fails on FaceIt demos.
+        This bypasses awpy's full parse() which requires round parsing.
         We extract kill events directly from the demo without needing rounds.
 
         Args:
@@ -52,57 +54,72 @@ class FaceItDemoParserService:
         Raises:
             Exception: If parsing fails completely
         """
-        logger.info(f"Parsing FaceIt demo with demoparser2: {demo_file_path}")
+        logger.info(f"Parsing FaceIt demo with awpy.parse_events(): {demo_file_path}")
         start_time = time.time()
 
         try:
             if not demo_file_path.exists():
                 raise FileNotFoundError(f"Demo file not found: {demo_file_path}")
 
-            # Initialize demoparser2 directly
-            parser = DemoParser(str(demo_file_path))
+            # Initialize awpy Demo object
+            demo = Demo(path=str(demo_file_path), verbose=True)
 
-            # Parse player_death events to get all kills
-            # Request key fields we need for highlight detection
-            logger.info("Extracting player_death events from FaceIt demo...")
+            logger.info("Extracting all events from FaceIt demo...")
 
-            kills_df = parser.parse_event(
-                "player_death",
-                player=["X", "Y", "Z", "player_name"],  # Player positions and name
-                other=["total_rounds_played", "game_time"]  # Round info and timestamp
-            )
+            # Use parse_events() to get raw events without requiring round parsing
+            # This method extracts events directly from the demo file
+            events_dict = demo.parse_events()
 
-            logger.info(f"✓ Extracted {len(kills_df)} player_death events")
-            logger.info(f"DataFrame columns: {list(kills_df.columns)}")
+            logger.info(f"✓ Extracted {len(events_dict)} event types")
+            logger.info(f"Event types available: {list(events_dict.keys())}")
 
-            # Log first kill to see data structure
-            if len(kills_df) > 0:
-                logger.info(f"Sample kill data: {kills_df.iloc[0].to_dict()}")
+            # Extract player_death events using awpy's utility function
+            # This is the same approach awpy uses internally for demo.kills
+            if "player_death" in events_dict:
+                raw_kills = events_dict["player_death"]
+                logger.info(f"✓ Found {len(raw_kills)} player_death events")
 
-            # Convert DataFrame to list of dictionaries for compatibility with existing code
-            # The DataFrame columns will include event fields + requested player/other fields
-            kills = kills_df.to_dict('records')
+                # Use awpy's parse_kills() to standardize the kill data
+                # This renames "user_" columns to "victim_" and processes hitgroups
+                kills_df = awpy.parsers.events.parse_kills(raw_kills)
 
-            # Extract map name from header if available
-            map_name = "Unknown"
-            try:
-                # Parse header separately to get map name
-                # In demoparser2, we can extract this from game events
-                header_df = parser.parse_event("round_start", other=["map_name"])
-                if len(header_df) > 0:
-                    map_name = header_df.iloc[0].get('map_name', 'Unknown')
-            except Exception as e:
-                logger.warning(f"Could not extract map name: {e}")
+                logger.info(f"DataFrame columns: {list(kills_df.columns)}")
 
-            # Get total rounds played from the kills data
+                # Log first kill to see data structure
+                if len(kills_df) > 0:
+                    logger.info(f"Sample kill data (first 3 columns): {kills_df.iloc[0][:3].to_dict()}")
+
+                # Convert to list of dictionaries
+                kills = kills_df.to_dict('records')
+            else:
+                logger.warning("No player_death events found in demo!")
+                kills = []
+
+            # Extract map name from header
+            map_name = demo.header.get("map_name", "Unknown") if hasattr(demo, 'header') else "Unknown"
+
+            # Determine total rounds from kills data
+            # Look for a round-related field in the kills
             total_rounds = 0
             if len(kills) > 0:
-                # The last kill should have the final round number
-                total_rounds = max([k.get('total_rounds_played', 0) for k in kills]) + 1
+                # Check various possible round number fields
+                round_fields = ['round_num', 'round', 'total_rounds_played']
+                for field in round_fields:
+                    if field in kills[0]:
+                        total_rounds = max([k.get(field, 0) for k in kills]) + 1
+                        break
+
+            # If still 0, estimate from tick data
+            if total_rounds == 0 and len(kills) > 0:
+                # CS2 rounds are typically ~120 seconds at 128 tick/sec = ~15,360 ticks
+                # Estimate rounds from tick span
+                if 'tick' in kills[0]:
+                    max_tick = max([k.get('tick', 0) for k in kills])
+                    total_rounds = max(1, int(max_tick / 15360))
 
             elapsed = time.time() - start_time
             logger.info(f"✓ FaceIt demo parsed successfully in {elapsed:.2f} seconds")
-            logger.info(f"  Found {len(kills)} kills across {total_rounds} rounds")
+            logger.info(f"  Found {len(kills)} kills across ~{total_rounds} rounds")
 
             # Build a data structure compatible with the existing highlight detector
             demo_data = {
@@ -129,7 +146,7 @@ class FaceItDemoParserService:
         except Exception as e:
             logger.error(f"FaceIt demo parsing failed: {str(e)}", exc_info=True)
             raise Exception(
-                f"Failed to parse FaceIt demo with demoparser2.\n\n"
+                f"Failed to parse FaceIt demo with awpy.parse_events().\n\n"
                 f"Error: {str(e)}\n\n"
                 f"This could be due to:\n"
                 f"1. Demo file is corrupted or incomplete\n"
@@ -138,7 +155,7 @@ class FaceItDemoParserService:
                 f"Please try:\n"
                 f"- A different FaceIt demo\n"
                 f"- A more recent demo (last 30 days)\n"
-                f"- Updating awpy/demoparser2: pip install --upgrade awpy demoparser2"
+                f"- Updating awpy: pip install --upgrade awpy"
             )
 
     def _extract_faceit_match_info(self, demo_data: Dict, total_rounds: int) -> MatchInfo:
@@ -173,22 +190,29 @@ class FaceItDemoParserService:
             kills_data = demo_data.get("kills", [])
             player_stats_map: Dict[str, Dict] = {}
 
-            for kill in kills_data:
-                # The DataFrame columns might use different names
-                # demoparser2 returns attacker/victim info in the event
-                # We need to check what fields are actually available
+            # Debug: log all available fields in first kill
+            if len(kills_data) > 0:
+                logger.info(f"Available fields in kill data: {list(kills_data[0].keys())}")
 
-                # Try different possible field names for attacker/victim
+            for kill in kills_data:
+                # awpy's parse_kills() renames "user_" to "victim_"
+                # So we should have fields like:
+                # - attacker_name, victim_name
+                # - attacker_steamid, victim_steamid
+                # - weapon, headshot, etc.
+
+                # Try different possible field names
                 attacker_name = (
                     kill.get("attacker_name") or
+                    kill.get("attacker_player_name") or
                     kill.get("attacker") or
-                    kill.get("user_name") or
                     "Unknown"
                 )
 
                 victim_name = (
                     kill.get("victim_name") or
-                    kill.get("userid_name") or
+                    kill.get("victim_player_name") or
+                    kill.get("user_name") or  # fallback if parse_kills didn't rename
                     kill.get("victim") or
                     "Unknown"
                 )
