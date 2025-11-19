@@ -94,8 +94,18 @@ class HighlightDetectorService:
         kills_by_round: Dict[int, List[Dict]] = defaultdict(list)
 
         for kill in kills_data:
-            round_num = kill.get("round", 0)
-            kills_by_round[round_num].append(kill)
+            # Try multiple possible field names for round number
+            # Different parsers use different field names
+            round_num = (
+                kill.get("round") or
+                kill.get("round_num") or
+                kill.get("total_rounds_played") or
+                0
+            )
+            # Handle None values
+            if round_num is None:
+                round_num = 0
+            kills_by_round[int(round_num)].append(kill)
 
         # Check each round for aces
         for round_num, round_kills in kills_by_round.items():
@@ -188,8 +198,16 @@ class HighlightDetectorService:
         # Group kills by round
         kills_by_round: Dict[int, List[Dict]] = defaultdict(list)
         for kill in kills_data:
-            round_num = kill.get("round", 0)
-            kills_by_round[round_num].append(kill)
+            # Try multiple possible field names for round number
+            round_num = (
+                kill.get("round") or
+                kill.get("round_num") or
+                kill.get("total_rounds_played") or
+                0
+            )
+            if round_num is None:
+                round_num = 0
+            kills_by_round[int(round_num)].append(kill)
 
         # Check each round
         for round_num, round_kills in kills_by_round.items():
