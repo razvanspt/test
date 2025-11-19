@@ -19,6 +19,7 @@ import uvicorn
 
 # Import our service classes (like @Autowired in Spring)
 from demo_parser_service import DemoParserService
+from faceit_demo_parser_service import FaceItDemoParserService
 from highlight_detector_service import HighlightDetectorService
 
 # Import models (DTOs)
@@ -71,6 +72,7 @@ app.add_middleware(
 # Create service instances (singleton pattern)
 # In Spring Boot, these would be @Autowired
 demo_parser_service = DemoParserService()
+faceit_parser_service = FaceItDemoParserService()
 highlight_detector_service = HighlightDetectorService()
 
 # === UTILITY FUNCTIONS ===
@@ -282,6 +284,145 @@ async def analyze_demo(file: UploadFile = File(...)):
     except Exception as e:
         # Catch any other unexpected errors
         logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred: {str(e)}"
+        )
+
+
+@app.post(
+    "/api/analyze-demo-faceit",
+    response_model=DemoAnalysisResponse,
+    responses={
+        200: {"description": "FaceIt demo analyzed successfully"},
+        400: {"description": "Invalid file or bad request"},
+        500: {"description": "Internal server error"}
+    }
+)
+async def analyze_faceit_demo(file: UploadFile = File(...)):
+    """
+    Specialized endpoint for FaceIt CS2 demos
+
+    FaceIt servers use custom configurations that don't emit standard events
+    like 'round_officially_ended', which breaks normal awpy parsing. This
+    endpoint uses alternative parsing strategies to extract highlights from
+    FaceIt demos.
+
+    In Spring:
+    @PostMapping("/api/analyze-demo-faceit")
+    public ResponseEntity<DemoAnalysisResponse> analyzeFaceItDemo(
+        @RequestParam("file") MultipartFile file
+    )
+
+    Args:
+        file: Uploaded .dem file from FaceIt
+
+    Returns:
+        DemoAnalysisResponse with highlights and stats
+
+    Raises:
+        HTTPException: If file is invalid or processing fails
+    """
+    logger.info(f"Received FaceIt demo upload: {file.filename}")
+    start_time = time.time()
+
+    # Validate file
+    if not validate_demo_file(file.filename):
+        logger.warning(f"Invalid file type: {file.filename}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Only .dem files are allowed."
+        )
+
+    file_size = 0
+    chunk_size = 1024 * 1024  # 1MB chunks
+
+    try:
+        # Generate unique ID
+        demo_id = str(uuid.uuid4())
+        file_path = DEMO_UPLOAD_DIR / f"{demo_id}_faceit.dem"
+
+        logger.info(f"Saving FaceIt demo to: {file_path}")
+
+        # Save file
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+
+                file_size += len(chunk)
+
+                if file_size > MAX_UPLOAD_SIZE:
+                    logger.warning(f"File too large: {file_size} bytes")
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE / 1024 / 1024}MB"
+                    )
+
+                f.write(chunk)
+
+        logger.info(f"FaceIt demo saved ({file_size / 1024 / 1024:.2f}MB)")
+
+        # === FACEIT DEMO PARSING ===
+
+        logger.info("Starting FaceIt demo parsing...")
+        try:
+            parsed_data = faceit_parser_service.parse_faceit_demo(file_path)
+
+            raw_demo_data = parsed_data["raw_data"]
+            match_info = parsed_data["match_info"]
+            player_stats = parsed_data["player_stats"]
+
+        except Exception as e:
+            logger.error(f"FaceIt demo parsing failed: {str(e)}", exc_info=True)
+            file_path.unlink(missing_ok=True)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to parse FaceIt demo: {str(e)}"
+            )
+
+        # === HIGHLIGHT DETECTION ===
+
+        logger.info("Detecting highlights in FaceIt demo...")
+        try:
+            kills_data = faceit_parser_service.get_kills_data(raw_demo_data)
+
+            # For FaceIt, we don't have proper rounds, so we pass empty rounds
+            # Highlight detection will work with just kills data
+            highlights = highlight_detector_service.detect_highlights(
+                rounds_data=[],  # No round data from FaceIt
+                kills_data=kills_data
+            )
+
+        except Exception as e:
+            logger.error(f"Highlight detection failed: {str(e)}", exc_info=True)
+            highlights = []
+
+        # === RESPONSE ===
+
+        processing_time = time.time() - start_time
+        logger.info(f"✓ FaceIt demo analysis completed in {processing_time:.2f} seconds")
+        logger.info(f"  Found {len(highlights)} highlights")
+
+        response = DemoAnalysisResponse(
+            success=True,
+            message=f"FaceIt demo analyzed successfully. Found {len(highlights)} highlights.",
+            match_info=match_info,
+            highlights=highlights,
+            player_stats=player_stats,
+            demo_file_id=demo_id,
+            processing_time_seconds=round(processing_time, 2)
+        )
+
+        return response
+
+    except HTTPException:
+        raise
+
+    except Exception as e:
+        logger.error(f"Unexpected error processing FaceIt demo: {str(e)}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An unexpected error occurred: {str(e)}"

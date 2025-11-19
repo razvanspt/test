@@ -294,6 +294,13 @@
                 </div>
                 <div id="selectedFile" style="margin-top: 20px; text-align: center; display: none;">
                     <strong>Selected:</strong> <span id="fileName"></span>
+                    <div style="margin: 15px 0;">
+                        <label style="margin-right: 10px; font-weight: bold;">Demo Type:</label>
+                        <select id="demoType" style="padding: 8px; border-radius: 5px; border: 2px solid #667eea; font-size: 1em;">
+                            <option value="standard">Standard (Matchmaking)</option>
+                            <option value="faceit">FaceIt</option>
+                        </select>
+                    </div>
                     <button class="btn" id="uploadBtn" onclick="uploadDemo()">Analyze Demo</button>
                 </div>
             </div>
@@ -388,6 +395,10 @@
         async function uploadDemo() {
             if (!selectedFile) return;
 
+            // Get demo type selection
+            const demoType = document.getElementById('demoType').value;
+            const endpoint = demoType === 'faceit' ? '/api/analyze-demo-faceit' : '/api/analyze-demo';
+
             // Show loading
             loading.classList.add('active');
             results.classList.remove('active');
@@ -400,7 +411,7 @@
                 formData.append('file', selectedFile);
 
                 // Upload and analyze
-                const response = await fetch(`${API_URL}/api/analyze-demo`, {
+                const response = await fetch(`${API_URL}${endpoint}`, {
                     method: 'POST',
                     body: formData
                 });
