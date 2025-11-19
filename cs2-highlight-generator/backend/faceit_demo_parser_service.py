@@ -117,24 +117,40 @@ class FaceItDemoParserService:
             bomb = []
             map_name = "Unknown"
 
-            # Try to extract kills - handle both list and None cases
-            if hasattr(demo, 'kills'):
-                if demo.kills is not None:
-                    # Check if it's a list or DataFrame
-                    if isinstance(demo.kills, list):
-                        kills = demo.kills if len(demo.kills) > 0 else []
-                    else:
-                        # Might be a pandas DataFrame or other type
-                        try:
-                            kills = demo.kills.to_dict('records') if hasattr(demo.kills, 'to_dict') else []
-                        except:
-                            kills = []
+            # Try to extract kills - each property access can trigger parsing, so wrap in try-except
+            try:
+                kills_raw = demo.kills
+                logger.info(f"Kills data type: {type(kills_raw)}")
 
-            if len(kills) > 0:
-                logger.info(f"✓ Extracted {len(kills)} kills from demo object")
+                if kills_raw is not None:
+                    # Check if it's a list, DataFrame, or Polars DataFrame
+                    if isinstance(kills_raw, list):
+                        kills = kills_raw if len(kills_raw) > 0 else []
+                        logger.info(f"Kills is a list with {len(kills)} items")
+                    elif hasattr(kills_raw, 'to_dict'):
+                        # Polars DataFrame or Pandas DataFrame
+                        logger.info(f"Kills is a DataFrame with shape: {kills_raw.shape if hasattr(kills_raw, 'shape') else 'unknown'}")
+                        try:
+                            kills = kills_raw.to_dict('records')
+                            logger.info(f"Converted DataFrame to {len(kills)} records")
+                        except Exception as conv_err:
+                            logger.warning(f"Could not convert to dict: {conv_err}")
+                            kills = []
+                    else:
+                        logger.warning(f"Unknown kills data type: {type(kills_raw)}")
+                        kills = []
+
+                    if len(kills) > 0:
+                        logger.info(f"✓ Extracted {len(kills)} kills from demo object")
+                        # Log first kill to see structure
+                        logger.debug(f"Sample kill: {kills[0]}")
+                else:
+                    logger.warning("demo.kills is None")
+            except Exception as e:
+                logger.warning(f"Could not access kills: {e}", exc_info=True)
 
             # Try to extract damages
-            if hasattr(demo, 'damages'):
+            try:
                 if demo.damages is not None:
                     if isinstance(demo.damages, list):
                         damages = demo.damages if len(demo.damages) > 0 else []
@@ -144,22 +160,32 @@ class FaceItDemoParserService:
                         except:
                             damages = []
 
-            if len(damages) > 0:
-                logger.info(f"✓ Extracted {len(damages)} damage events")
+                    if len(damages) > 0:
+                        logger.info(f"✓ Extracted {len(damages)} damage events")
+            except Exception as e:
+                logger.warning(f"Could not access damages: {e}")
 
-            # Try to extract bomb events
-            if hasattr(demo, 'bomb') and demo.bomb is not None:
-                if isinstance(demo.bomb, list):
-                    bomb = demo.bomb
-                else:
-                    try:
-                        bomb = demo.bomb.to_dict('records') if hasattr(demo.bomb, 'to_dict') else []
-                    except:
-                        bomb = []
+            # Try to extract bomb events - this often fails, so we'll skip it if it does
+            try:
+                if demo.bomb is not None:
+                    if isinstance(demo.bomb, list):
+                        bomb = demo.bomb
+                    else:
+                        try:
+                            bomb = demo.bomb.to_dict('records') if hasattr(demo.bomb, 'to_dict') else []
+                        except:
+                            bomb = []
+            except Exception as e:
+                # Bomb parsing often fails for FaceIt demos - that's okay
+                logger.debug(f"Could not access bomb data (expected for FaceIt): {e}")
+                bomb = []
 
             # Try to get map name
-            if hasattr(demo, 'map_name') and demo.map_name:
-                map_name = demo.map_name
+            try:
+                if demo.map_name:
+                    map_name = demo.map_name
+            except:
+                pass
 
             # Check if we got any useful data
             if len(kills) == 0:
