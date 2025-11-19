@@ -100,64 +100,85 @@ class DemoParserService:
                 # Specific handling for missing event errors
                 parse_error = str(ke)
                 if "round_officially_ended" in parse_error:
-                    logger.warning(f"Demo missing 'round_officially_ended' event. Trying partial parse...")
+                    logger.warning(f"Demo missing 'round_officially_ended' event (common with FaceIt demos)")
+                    logger.info("Attempting to extract kills data without round parsing...")
 
-                    # Method 2: Parse without rounds (just get kills and damages)
+                    # Method 2: FaceIt/Custom Server Workaround
+                    # The error occurs AFTER events are parsed, so we can access them
                     try:
-                        demo = Demo(
-                            path=demo_file_path,
-                            tickrate=128,
-                            verbose=False
-                        )
-
-                        # Parse header first
-                        demo.parse_header()
-
-                        # Manually parse just the events we need (kills, damages)
-                        # Skip round parsing which is causing the error
-                        demo.parse_events()  # Parse raw events
-
-                        # Extract kills and damages from events
-                        from awpy.parsers import kills as kills_parser
-                        from awpy.parsers import damages as damages_parser
-
-                        # Try to parse kills and damages directly from events
-                        kills_data = []
-                        damages_data = []
-
-                        try:
-                            if hasattr(demo, 'events') and demo.events:
-                                kills_data = kills_parser.parse_kills(demo.events) if hasattr(kills_parser, 'parse_kills') else []
-                                damages_data = damages_parser.parse_damages(demo.events) if hasattr(damages_parser, 'parse_damages') else []
-                        except Exception as parse_err:
-                            logger.warning(f"Could not parse kills/damages: {parse_err}")
-
-                        demo_data = {
-                            "header": {
-                                "map_name": getattr(demo, 'map_name', 'Unknown'),
-                            },
-                            "kills": kills_data,
-                            "damages": damages_data,
-                            "bomb": [],
-                            "rounds": []
-                        }
-
-                        logger.info("Successfully parsed demo with partial data (no rounds)")
+                        # Check if demo object exists and has events/kills data
+                        if hasattr(demo, 'kills') and demo.kills is not None:
+                            logger.info(f"Found {len(demo.kills)} kills in partially parsed demo")
+                            demo_data = {
+                                "header": {
+                                    "map_name": getattr(demo, 'map_name', 'Unknown'),
+                                },
+                                "kills": demo.kills,
+                                "damages": demo.damages if hasattr(demo, 'damages') and demo.damages is not None else [],
+                                "bomb": demo.bomb if hasattr(demo, 'bomb') and demo.bomb is not None else [],
+                                "rounds": []  # FaceIt demos don't have standard round data
+                            }
+                            logger.info("✓ Successfully extracted kills from FaceIt demo (rounds skipped)")
+                        else:
+                            # If that didn't work, try re-parsing with custom approach
+                            raise ValueError("No kills data found in partial parse")
 
                     except Exception as e2:
-                        logger.error(f"Partial parsing also failed: {e2}")
-                        raise Exception(
-                            f"Failed to parse demo file. The demo is missing critical events.\n\n"
-                            f"This usually means:\n"
-                            f"1. **Demo is from CS:GO (not CS2)**: This tool ONLY supports CS2\n"
-                            f"2. **Demo is from very early CS2 beta**: Use a more recent demo\n"
-                            f"3. **Demo is corrupted or incomplete**\n\n"
-                            f"Error: {parse_error}\n\n"
-                            f"**What to do:**\n"
-                            f"→ Download a demo from a RECENT CS2 competitive match (2024+)\n"
-                            f"→ Make sure it's CS2, not CS:GO (CS2 released Sept 2023)\n"
-                            f"→ Try from: Watch → Your Matches in CS2 client"
-                        )
+                        logger.warning(f"Could not use partial data: {e2}")
+                        logger.info("Trying custom parsing for FaceIt demos...")
+
+                        # Method 3: Parse events manually
+                        try:
+                            # Create new demo instance
+                            demo_alt = Demo(
+                                path=demo_file_path,
+                                tickrate=128,
+                                verbose=True  # Enable verbose for debugging
+                            )
+
+                            # Parse header and events only (don't call parse() which triggers round parsing)
+                            demo_alt.parse_header()
+
+                            # Try to access the parser directly to get just kills
+                            # In awpy 2.0+, parsing happens in parse() which we can't call
+                            # So we'll try to get kills from the events if they exist
+                            try:
+                                # Attempt to trigger event parsing without round parsing
+                                # This is a hack - we call parse but catch the round error
+                                demo_alt.parse()
+                            except KeyError:
+                                # Expected - round parsing will fail, but events should be parsed
+                                pass
+
+                            # Now try to get data from the demo object
+                            if hasattr(demo_alt, 'kills') and demo_alt.kills is not None:
+                                demo_data = {
+                                    "header": {
+                                        "map_name": getattr(demo_alt, 'map_name', 'Unknown'),
+                                    },
+                                    "kills": demo_alt.kills,
+                                    "damages": demo_alt.damages if hasattr(demo_alt, 'damages') else [],
+                                    "bomb": [],
+                                    "rounds": []
+                                }
+                                logger.info(f"✓ Extracted {len(demo_alt.kills)} kills from FaceIt demo")
+                            else:
+                                raise ValueError("Failed to extract any data")
+
+                        except Exception as e3:
+                            logger.error(f"All FaceIt parsing methods failed: {e3}")
+                            raise Exception(
+                                f"Failed to parse FaceIt demo.\n\n"
+                                f"**This is a known issue with FaceIt CS2 demos.**\n\n"
+                                f"FaceIt servers use a custom configuration that is not fully compatible "
+                                f"with the awpy parsing library (missing 'round_officially_ended' event).\n\n"
+                                f"**Workarounds:**\n"
+                                f"1. Try a demo from official CS2 matchmaking (Watch → Your Matches)\n"
+                                f"2. Wait for awpy library update to support FaceIt demos\n"
+                                f"3. The developer needs to implement custom FaceIt demo parsing\n\n"
+                                f"Original error: {parse_error}\n\n"
+                                f"Sorry, FaceIt demo support is limited in the current version."
+                            )
                 else:
                     raise
 
