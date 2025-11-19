@@ -497,6 +497,174 @@ async def get_highlights(demo_id: str):
     )
 
 
+@app.post("/api/export/ffmpeg-script")
+async def export_ffmpeg_script(highlights: List[dict]):
+    """
+    Generate FFmpeg shell script to extract video clips from highlights
+
+    This endpoint takes the highlights JSON from /api/analyze and generates
+    a bash script with FFmpeg commands to cut clips from a gameplay recording.
+
+    Usage:
+    1. Upload .dem file to /api/analyze -> get highlights JSON
+    2. POST highlights to this endpoint -> get bash script
+    3. Run script with your gameplay video: ./script.sh video.mp4
+
+    Args:
+        highlights: List of highlight dicts from analysis response
+
+    Returns:
+        Plain text bash script
+
+    Example:
+        curl -X POST http://localhost:8000/api/export/ffmpeg-script \\
+             -H "Content-Type: application/json" \\
+             -d '[{"type":"ACE","round":3,"start_time":145.2,...}]' \\
+             > extract_highlights.sh
+        chmod +x extract_highlights.sh
+        ./extract_highlights.sh my_gameplay.mp4
+    """
+    try:
+        if not highlights or len(highlights) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No highlights provided"
+            )
+
+        # Generate script header
+        script = "#!/bin/bash\n"
+        script += "# CS2 Highlight Extractor - Auto-generated FFmpeg script\n"
+        script += f"# Generated for {len(highlights)} highlights\n"
+        script += "#\n"
+        script += "# USAGE: ./extract_highlights.sh <your_gameplay_video.mp4>\n"
+        script += "#\n"
+        script += "# IMPORTANT: Your gameplay video must be synchronized with the demo!\n"
+        script += "#            Start recording BEFORE the match starts.\n"
+        script += "#\n"
+        script += "# Requirements:\n"
+        script += "#   - FFmpeg installed (brew install ffmpeg / apt install ffmpeg)\n"
+        script += "#   - Enough disk space for clips\n"
+        script += "#\n\n"
+
+        script += 'if [ -z "$1" ]; then\n'
+        script += '    echo "❌ Error: No input video specified"\n'
+        script += '    echo ""\n'
+        script += '    echo "Usage: $0 <your_gameplay_video.mp4>"\n'
+        script += '    echo ""\n'
+        script += f'    echo "This script will extract {len(highlights)} highlight clips from your video."\n'
+        script += '    echo ""\n'
+        script += '    exit 1\n'
+        script += 'fi\n\n'
+
+        script += 'INPUT_VIDEO="$1"\n'
+        script += 'OUTPUT_DIR="highlight_clips"\n\n'
+
+        script += '# Check if input video exists\n'
+        script += 'if [ ! -f "$INPUT_VIDEO" ]; then\n'
+        script += '    echo "❌ Error: Video file not found: $INPUT_VIDEO"\n'
+        script += '    exit 1\n'
+        script += 'fi\n\n'
+
+        script += '# Check if FFmpeg is installed\n'
+        script += 'if ! command -v ffmpeg &> /dev/null; then\n'
+        script += '    echo "❌ Error: FFmpeg is not installed"\n'
+        script += '    echo ""\n'
+        script += '    echo "Install FFmpeg:"\n'
+        script += '    echo "  macOS:   brew install ffmpeg"\n'
+        script += '    echo "  Ubuntu:  sudo apt install ffmpeg"\n'
+        script += '    echo "  Windows: Download from https://ffmpeg.org/download.html"\n'
+        script += '    echo ""\n'
+        script += '    exit 1\n'
+        script += 'fi\n\n'
+
+        script += '# Create output directory\n'
+        script += 'mkdir -p "$OUTPUT_DIR"\n\n'
+
+        script += 'echo "╔══════════════════════════════════════════════════════════════╗"\n'
+        script += 'echo "║  CS2 Highlight Clip Extractor                                ║"\n'
+        script += 'echo "╚══════════════════════════════════════════════════════════════╝"\n'
+        script += f'echo "Input video: $INPUT_VIDEO"\n'
+        script += f'echo "Total highlights: {len(highlights)}"\n'
+        script += 'echo "Output directory: $OUTPUT_DIR/"\n'
+        script += 'echo ""\n\n'
+
+        # Generate FFmpeg commands for each highlight
+        for i, highlight in enumerate(highlights, 1):
+            start_time = highlight.get("start_time", 0)
+            end_time = highlight.get("end_time", 0)
+            duration = end_time - start_time
+
+            hl_type = highlight.get("type", "HIGHLIGHT")
+            round_num = highlight.get("round", 0)
+            player = highlight.get("player", "Unknown")
+            description = highlight.get("description", f"Highlight {i}")
+
+            # Sanitize player name for filename (remove special chars)
+            safe_player = "".join(c for c in player if c.isalnum() or c in (' ', '-', '_')).strip()
+            safe_player = safe_player.replace(' ', '_')
+
+            output_file = f"highlight_{i:02d}_{hl_type}_round{round_num}_{safe_player}.mp4"
+
+            script += f'# ────────────────────────────────────────────────────────────────\n'
+            script += f'# Highlight {i}/{len(highlights)}: {description}\n'
+            script += f'# Round: {round_num} | Player: {player}\n'
+            script += f'# Time: {start_time:.1f}s - {end_time:.1f}s (duration: {duration:.1f}s)\n'
+            script += f'# ────────────────────────────────────────────────────────────────\n'
+            script += f'echo "📹 Extracting clip {i}/{len(highlights)}: {description}"\n'
+
+            # FFmpeg command
+            # -ss before -i for fast seeking
+            # -t for duration
+            # -c:v libx264 -preset fast -crf 18 for good quality
+            # -c:a aac for audio
+            script += f'ffmpeg -y -loglevel warning -stats \\\n'
+            script += f'  -ss {start_time} \\\n'
+            script += f'  -i "$INPUT_VIDEO" \\\n'
+            script += f'  -t {duration} \\\n'
+            script += f'  -c:v libx264 -preset fast -crf 18 \\\n'
+            script += f'  -c:a aac -b:a 192k \\\n'
+            script += f'  "$OUTPUT_DIR/{output_file}"\n\n'
+
+            script += f'if [ $? -eq 0 ]; then\n'
+            script += f'    echo "✅ Created: {output_file}"\n'
+            script += f'else\n'
+            script += f'    echo "❌ Failed to create: {output_file}"\n'
+            script += f'fi\n'
+            script += f'echo ""\n\n'
+
+        # Footer
+        script += 'echo "╔══════════════════════════════════════════════════════════════╗"\n'
+        script += 'echo "║  Extraction Complete!                                        ║"\n'
+        script += 'echo "╚══════════════════════════════════════════════════════════════╝"\n'
+        script += 'echo ""\n'
+        script += 'echo "📂 Clips saved to: $OUTPUT_DIR/"\n'
+        script += 'echo ""\n'
+        script += 'ls -lh "$OUTPUT_DIR/" | grep -v "^total"\n'
+        script += 'echo ""\n'
+        script += f'echo "✅ Generated {len(highlights)} highlight clips"\n'
+
+        logger.info(f"Generated FFmpeg script for {len(highlights)} highlights")
+
+        # Return as plain text script
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            content=script,
+            media_type="text/x-shellscript",
+            headers={
+                "Content-Disposition": "attachment; filename=extract_highlights.sh"
+            }
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error generating FFmpeg script: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to generate script: {str(e)}"
+        )
+
+
 # === APPLICATION ENTRY POINT ===
 
 def main():
