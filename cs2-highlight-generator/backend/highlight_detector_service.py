@@ -31,6 +31,24 @@ class HighlightDetectorService:
         """Constructor"""
         logger.info("HighlightDetectorService initialized")
 
+    def _get_field_value(self, data: Dict, field_names: List[str], default=None):
+        """
+        Try multiple possible field names and return the first non-None value
+
+        Args:
+            data: Dictionary to search
+            field_names: List of possible field names to try
+            default: Default value if none found
+
+        Returns:
+            First non-None value found, or default
+        """
+        for field in field_names:
+            value = data.get(field)
+            if value is not None:
+                return value
+        return default
+
     def detect_highlights(
         self,
         rounds_data: List[Dict],
@@ -96,16 +114,25 @@ class HighlightDetectorService:
         for kill in kills_data:
             # Try multiple possible field names for round number
             # Different parsers use different field names
-            round_num = (
-                kill.get("round") or
-                kill.get("round_num") or
-                kill.get("total_rounds_played") or
-                0
+            round_num = self._get_field_value(
+                kill,
+                ["round", "round_num", "total_rounds_played"],
+                default=0
             )
             # Handle None values
             if round_num is None:
                 round_num = 0
             kills_by_round[int(round_num)].append(kill)
+
+        # Debug logging for FaceIt demos
+        logger.debug(f"Grouped {len(kills_data)} kills into {len(kills_by_round)} rounds")
+        if kills_data and len(kills_data) > 0:
+            sample_fields = list(kills_data[0].keys())
+            logger.debug(f"Sample kill fields: {sample_fields[:10]}...")  # First 10 fields
+            # Check for critical fields
+            has_attacker_name = any("attacker" in str(k).lower() and "name" in str(k).lower() for k in sample_fields)
+            has_tick = any("tick" in str(k).lower() for k in sample_fields)
+            logger.debug(f"Has attacker_name-like field: {has_attacker_name}, has tick field: {has_tick}")
 
         # Check each round for aces
         for round_num, round_kills in kills_by_round.items():
@@ -114,9 +141,14 @@ class HighlightDetectorService:
             kills_per_player: Dict[str, int] = defaultdict(int)
 
             for kill in round_kills:
-                attacker = kill.get("attacker_name", "")
+                # Try multiple possible field names for attacker
+                attacker = self._get_field_value(
+                    kill,
+                    ["attacker_name", "attacker", "killer_name", "killer"],
+                    default=""
+                )
                 if attacker:  # Ignore environment kills
-                    kills_per_player[attacker] += 1
+                    kills_per_player[str(attacker)] += 1
 
             # Find players with 5 kills (ACE)
             for player_name, kill_count in kills_per_player.items():
@@ -125,15 +157,15 @@ class HighlightDetectorService:
                     # Get the kills for this player in this round
                     player_kills = [
                         k for k in round_kills
-                        if k.get("attacker_name") == player_name
+                        if self._get_field_value(k, ["attacker_name", "attacker", "killer_name", "killer"], "") == player_name
                     ]
 
                     # Sort by tick to get chronological order
-                    player_kills.sort(key=lambda k: k.get("tick", 0))
+                    player_kills.sort(key=lambda k: self._get_field_value(k, ["tick", "server_tick", "game_tick"], 0))
 
                     # Get first and last kill ticks
-                    start_tick = player_kills[0].get("tick", 0)
-                    end_tick = player_kills[-1].get("tick", 0)
+                    start_tick = self._get_field_value(player_kills[0], ["tick", "server_tick", "game_tick"], 0)
+                    end_tick = self._get_field_value(player_kills[-1], ["tick", "server_tick", "game_tick"], 0)
 
                     # Add some padding (5 seconds before first kill, 3 seconds after last)
                     # 128 ticks per second in CS2
@@ -147,13 +179,13 @@ class HighlightDetectorService:
 
                     # Get weapons used
                     weapons = list(set([
-                        k.get("weapon", "Unknown")
+                        self._get_field_value(k, ["weapon", "weapon_name", "weapon_type"], "Unknown")
                         for k in player_kills
                     ]))
 
                     # Calculate total damage
                     total_damage = sum([
-                        k.get("attacker_damage", 0)
+                        self._get_field_value(k, ["attacker_damage", "damage", "dmg_health"], 0)
                         for k in player_kills
                     ])
 
@@ -199,11 +231,10 @@ class HighlightDetectorService:
         kills_by_round: Dict[int, List[Dict]] = defaultdict(list)
         for kill in kills_data:
             # Try multiple possible field names for round number
-            round_num = (
-                kill.get("round") or
-                kill.get("round_num") or
-                kill.get("total_rounds_played") or
-                0
+            round_num = self._get_field_value(
+                kill,
+                ["round", "round_num", "total_rounds_played"],
+                default=0
             )
             if round_num is None:
                 round_num = 0
@@ -214,9 +245,13 @@ class HighlightDetectorService:
             # Group kills by player
             kills_by_player: Dict[str, List[Dict]] = defaultdict(list)
             for kill in round_kills:
-                attacker = kill.get("attacker_name", "")
+                attacker = self._get_field_value(
+                    kill,
+                    ["attacker_name", "attacker", "killer_name", "killer"],
+                    default=""
+                )
                 if attacker:
-                    kills_by_player[attacker].append(kill)
+                    kills_by_player[str(attacker)].append(kill)
 
             # Check each player's kills
             for player_name, player_kills in kills_by_player.items():
@@ -225,7 +260,7 @@ class HighlightDetectorService:
                     continue
 
                 # Sort kills by tick
-                player_kills.sort(key=lambda k: k.get("tick", 0))
+                player_kills.sort(key=lambda k: self._get_field_value(k, ["tick", "server_tick", "game_tick"], 0))
 
                 # Find sequences of quick kills
                 # A "multi-kill" is MIN_MULTIKILL_KILLS kills within MULTIKILL_TIME_WINDOW seconds
@@ -234,10 +269,10 @@ class HighlightDetectorService:
                 for i in range(len(player_kills)):
                     # Try to find a sequence starting at position i
                     sequence = [player_kills[i]]
-                    start_tick = player_kills[i].get("tick", 0)
+                    start_tick = self._get_field_value(player_kills[i], ["tick", "server_tick", "game_tick"], 0)
 
                     for j in range(i + 1, len(player_kills)):
-                        current_tick = player_kills[j].get("tick", 0)
+                        current_tick = self._get_field_value(player_kills[j], ["tick", "server_tick", "game_tick"], 0)
                         time_diff = (current_tick - start_tick) / TICKS_PER_SECOND
 
                         if time_diff <= MULTIKILL_TIME_WINDOW:
@@ -257,8 +292,8 @@ class HighlightDetectorService:
                             continue  # Skip if not 3 or 4
 
                         # Get ticks
-                        start_tick = sequence[0].get("tick", 0)
-                        end_tick = sequence[-1].get("tick", 0)
+                        start_tick = self._get_field_value(sequence[0], ["tick", "server_tick", "game_tick"], 0)
+                        end_tick = self._get_field_value(sequence[-1], ["tick", "server_tick", "game_tick"], 0)
 
                         # Add padding
                         start_tick = max(0, start_tick - (5 * TICKS_PER_SECOND))
@@ -269,10 +304,10 @@ class HighlightDetectorService:
                         end_time = end_tick / TICKS_PER_SECOND
 
                         # Get weapons
-                        weapons = list(set([k.get("weapon", "Unknown") for k in sequence]))
+                        weapons = list(set([self._get_field_value(k, ["weapon", "weapon_name", "weapon_type"], "Unknown") for k in sequence]))
 
                         # Total damage
-                        total_damage = sum([k.get("attacker_damage", 0) for k in sequence])
+                        total_damage = sum([self._get_field_value(k, ["attacker_damage", "damage", "dmg_health"], 0) for k in sequence])
 
                         # Create highlight
                         multikill = HighlightMoment(
