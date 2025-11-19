@@ -117,11 +117,11 @@ class HighlightDetectorService:
             round_num = self._get_field_value(
                 kill,
                 ["round", "round_num", "total_rounds_played"],
-                default=0
+                default=1  # Default to round 1 if no round data (model requires >= 1)
             )
-            # Handle None values
-            if round_num is None:
-                round_num = 0
+            # Handle None values or 0 (model validation requires round_number >= 1)
+            if round_num is None or round_num == 0:
+                round_num = 1
             kills_by_round[int(round_num)].append(kill)
 
         # Debug logging for FaceIt demos
@@ -234,10 +234,11 @@ class HighlightDetectorService:
             round_num = self._get_field_value(
                 kill,
                 ["round", "round_num", "total_rounds_played"],
-                default=0
+                default=1  # Default to round 1 if no round data (model requires >= 1)
             )
-            if round_num is None:
-                round_num = 0
+            # Handle None values or 0 (model validation requires round_number >= 1)
+            if round_num is None or round_num == 0:
+                round_num = 1
             kills_by_round[int(round_num)].append(kill)
 
         # Check each round
