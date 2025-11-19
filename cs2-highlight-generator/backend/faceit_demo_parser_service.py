@@ -68,11 +68,16 @@ class FaceItDemoParserService:
 
             kills_df = parser.parse_event(
                 "player_death",
-                player=["X", "Y", "Z"],  # Player positions
+                player=["X", "Y", "Z", "player_name"],  # Player positions and name
                 other=["total_rounds_played", "game_time"]  # Round info and timestamp
             )
 
             logger.info(f"✓ Extracted {len(kills_df)} player_death events")
+            logger.info(f"DataFrame columns: {list(kills_df.columns)}")
+
+            # Log first kill to see data structure
+            if len(kills_df) > 0:
+                logger.info(f"Sample kill data: {kills_df.iloc[0].to_dict()}")
 
             # Convert DataFrame to list of dictionaries for compatibility with existing code
             # The DataFrame columns will include event fields + requested player/other fields
