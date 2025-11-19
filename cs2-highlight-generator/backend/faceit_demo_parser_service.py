@@ -88,117 +88,80 @@ class FaceItDemoParserService:
 
     def _parse_with_error_recovery(self, demo_file_path: Path) -> Dict[str, Any]:
         """
-        Parse demo and recover data even if round parsing fails
+        Parse demo and extract kills directly from raw events
 
-        The key insight: awpy parses kills BEFORE rounds, so when round parsing
-        fails, kills data is already in memory. We just need to access it.
+        KEY INSIGHT: When round parsing fails, demo.kills/damages/bomb become
+        inaccessible because they depend on self.rounds. Instead, we access
+        demo.events (raw event data) and manually extract kill events.
         """
         try:
             demo = Demo(path=demo_file_path, tickrate=128, verbose=False)
 
-            # Try to parse - this will fail on rounds but hopefully parse kills first
-            try:
-                demo.parse()
-            except (KeyError, Exception) as e:
-                # Expected to fail on round parsing
-                logger.info(f"Parse failed as expected (rounds): {e}")
-                # But demo object should still have partial data
-                pass
-
-            # Parse header separately (usually works)
+            # Parse header first (this usually works)
             try:
                 demo.parse_header()
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Header parsing failed: {e}")
 
-            # Now check what data we got
+            # Parse events (this works even when rounds fail)
+            try:
+                demo.parse_events()
+                logger.info("✓ Events parsed successfully")
+            except Exception as e:
+                logger.warning(f"Event parsing failed: {e}")
+                return None
+
+            # Check if we have events
+            if not hasattr(demo, 'events') or demo.events is None:
+                logger.warning("No events found in demo")
+                return None
+
+            events = demo.events
+            logger.info(f"Found {len(events)} event types in demo")
+
+            # Extract kill events directly from events dictionary
             kills = []
-            damages = []
-            bomb = []
-            map_name = "Unknown"
+            if 'player_death' in events:
+                kill_events = events['player_death']
+                logger.info(f"Found {len(kill_events)} player_death events")
 
-            # Try to extract kills - each property access can trigger parsing, so wrap in try-except
-            try:
-                kills_raw = demo.kills
-                logger.info(f"Kills data type: {type(kills_raw)}")
-
-                if kills_raw is not None:
-                    # Check if it's a list, DataFrame, or Polars DataFrame
-                    if isinstance(kills_raw, list):
-                        kills = kills_raw if len(kills_raw) > 0 else []
-                        logger.info(f"Kills is a list with {len(kills)} items")
-                    elif hasattr(kills_raw, 'to_dict'):
-                        # Polars DataFrame or Pandas DataFrame
-                        logger.info(f"Kills is a DataFrame with shape: {kills_raw.shape if hasattr(kills_raw, 'shape') else 'unknown'}")
-                        try:
-                            kills = kills_raw.to_dict('records')
-                            logger.info(f"Converted DataFrame to {len(kills)} records")
-                        except Exception as conv_err:
-                            logger.warning(f"Could not convert to dict: {conv_err}")
-                            kills = []
-                    else:
-                        logger.warning(f"Unknown kills data type: {type(kills_raw)}")
-                        kills = []
-
-                    if len(kills) > 0:
-                        logger.info(f"✓ Extracted {len(kills)} kills from demo object")
-                        # Log first kill to see structure
-                        logger.debug(f"Sample kill: {kills[0]}")
+                # Convert to list of dicts if it's a DataFrame
+                if hasattr(kill_events, 'to_dicts'):
+                    # Polars DataFrame
+                    kills = kill_events.to_dicts()
+                elif hasattr(kill_events, 'to_dict'):
+                    # Pandas DataFrame
+                    kills = kill_events.to_dict('records')
+                elif isinstance(kill_events, list):
+                    kills = kill_events
                 else:
-                    logger.warning("demo.kills is None")
-            except Exception as e:
-                logger.warning(f"Could not access kills: {e}", exc_info=True)
+                    logger.warning(f"Unknown kill events type: {type(kill_events)}")
+                    kills = []
 
-            # Try to extract damages
-            try:
-                if demo.damages is not None:
-                    if isinstance(demo.damages, list):
-                        damages = demo.damages if len(demo.damages) > 0 else []
-                    else:
-                        try:
-                            damages = demo.damages.to_dict('records') if hasattr(demo.damages, 'to_dict') else []
-                        except:
-                            damages = []
-
-                    if len(damages) > 0:
-                        logger.info(f"✓ Extracted {len(damages)} damage events")
-            except Exception as e:
-                logger.warning(f"Could not access damages: {e}")
-
-            # Try to extract bomb events - this often fails, so we'll skip it if it does
-            try:
-                if demo.bomb is not None:
-                    if isinstance(demo.bomb, list):
-                        bomb = demo.bomb
-                    else:
-                        try:
-                            bomb = demo.bomb.to_dict('records') if hasattr(demo.bomb, 'to_dict') else []
-                        except:
-                            bomb = []
-            except Exception as e:
-                # Bomb parsing often fails for FaceIt demos - that's okay
-                logger.debug(f"Could not access bomb data (expected for FaceIt): {e}")
-                bomb = []
+                logger.info(f"✓ Extracted {len(kills)} kills from events")
+                if len(kills) > 0:
+                    logger.debug(f"Sample kill: {kills[0]}")
 
             # Try to get map name
+            map_name = "Unknown"
             try:
-                if demo.map_name:
+                if hasattr(demo, 'map_name') and demo.map_name:
                     map_name = demo.map_name
             except:
                 pass
 
             # Check if we got any useful data
             if len(kills) == 0:
-                logger.warning("No kills found in partial parse - kills attribute is empty or not populated")
-                logger.info(f"Demo object attributes: {dir(demo)}")
+                logger.warning("No kill events found in parsed events")
+                logger.info(f"Available event types: {list(events.keys())}")
                 return None
 
             return {
                 "header": {"map_name": map_name},
                 "kills": kills,
-                "damages": damages,
-                "bomb": bomb,
-                "rounds": []  # FaceIt doesn't have round data
+                "damages": [],  # Can add damage event extraction if needed
+                "bomb": [],
+                "rounds": []
             }
 
         except Exception as e:
