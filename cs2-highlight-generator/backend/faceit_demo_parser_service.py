@@ -78,10 +78,7 @@ class FaceItDemoParserService:
                 name_cols = [col for col in kills_df.columns if 'name' in col.lower()]
                 logger.info(f"Columns containing 'name': {name_cols}")
 
-            # Convert DataFrame to list of dictionaries
-            kills = kills_df.to_dict('records')
-
-            # Try to get map name
+            # Try to get map name BEFORE converting data (while parser is still available)
             map_name = "Unknown"
             try:
                 # Attempt to get header info
@@ -94,6 +91,13 @@ class FaceItDemoParserService:
                         map_name = str(header_df.iloc[0][map_cols[0]])
             except Exception as e:
                 logger.warning(f"Could not extract map name: {e}")
+
+            # Convert DataFrame to list of dictionaries
+            kills = kills_df.to_dict('records')
+
+            # IMPORTANT: Delete parser to release file handle (Windows compatibility)
+            # On Windows, the Rust-based parser keeps file handle open until GC
+            del parser
 
             # Determine total rounds from kills data
             total_rounds = 0
