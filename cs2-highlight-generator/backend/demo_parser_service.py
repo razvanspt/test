@@ -68,29 +68,82 @@ class DemoParserService:
             # Initialize the Demo object (awpy 2.0+ API)
             # This is the main class from the awpy library
             logger.info("Parsing demo... this may take 10-30 seconds")
-            demo = Demo(
-                path=demo_file_path,  # Path to demo file
-                tickrate=128,  # 128 ticks/second in CS2
-                verbose=False  # Don't print debug messages
-            )
 
-            # Parse the demo file
-            # This reads the entire .dem file and extracts all data
-            # It can take 5-30 seconds depending on demo size
-            demo.parse()  # Parse all data
-            demo.parse_header()  # Parse header info (map name, etc.)
+            # Try parsing with error handling
+            demo_data = None
+            parse_error = None
 
-            # Build a dictionary structure similar to old API for compatibility
-            # In awpy 2.0+, data is accessed as attributes (demo.kills, demo.damages, etc.)
-            demo_data = {
-                "header": {
-                    "map_name": getattr(demo, 'map_name', 'Unknown'),
-                },
-                "kills": demo.kills if demo.kills is not None else [],
-                "damages": demo.damages if demo.damages is not None else [],
-                "bomb": demo.bomb if demo.bomb is not None else [],
-                "rounds": []  # awpy 2.0+ has different round structure
-            }
+            try:
+                # Method 1: Standard parsing (works for most CS2 demos)
+                demo = Demo(
+                    path=demo_file_path,  # Path to demo file
+                    tickrate=128,  # 128 ticks/second in CS2
+                    verbose=False  # Don't print debug messages
+                )
+
+                demo.parse()  # Parse all data
+                demo.parse_header()  # Parse header info (map name, etc.)
+
+                # Build a dictionary structure similar to old API for compatibility
+                # In awpy 2.0+, data is accessed as attributes (demo.kills, demo.damages, etc.)
+                demo_data = {
+                    "header": {
+                        "map_name": getattr(demo, 'map_name', 'Unknown'),
+                    },
+                    "kills": demo.kills if demo.kills is not None else [],
+                    "damages": demo.damages if demo.damages is not None else [],
+                    "bomb": demo.bomb if demo.bomb is not None else [],
+                    "rounds": []  # awpy 2.0+ has different round structure
+                }
+
+            except Exception as e:
+                parse_error = str(e)
+                logger.warning(f"Standard parsing failed: {e}")
+
+                # Method 2: Try with different tickrate (some demos work better with this)
+                try:
+                    logger.info("Retrying with alternative settings...")
+                    demo = Demo(
+                        path=demo_file_path,
+                        tickrate=64,  # Lower tickrate
+                        verbose=True  # Enable verbose to see what's happening
+                    )
+
+                    # Parse header first (less likely to fail)
+                    demo.parse_header()
+
+                    # Then try parsing data
+                    demo.parse()
+
+                    demo_data = {
+                        "header": {
+                            "map_name": getattr(demo, 'map_name', 'Unknown'),
+                        },
+                        "kills": demo.kills if demo.kills is not None else [],
+                        "damages": demo.damages if demo.damages is not None else [],
+                        "bomb": demo.bomb if demo.bomb is not None else [],
+                        "rounds": []
+                    }
+
+                except Exception as e2:
+                    logger.error(f"Alternative parsing also failed: {e2}")
+                    # Raise detailed error
+                    raise Exception(
+                        f"Failed to parse demo file. Possible causes:\n\n"
+                        f"1. **Demo is from CS:GO (not CS2)**: This tool only supports CS2 demos\n"
+                        f"2. **Corrupted or incomplete demo**: Try downloading again\n"
+                        f"3. **Unsupported CS2 version**: Try a more recent demo\n"
+                        f"4. **Outdated awpy library**: Run this command:\n"
+                        f"   pip install --upgrade awpy\n\n"
+                        f"Original error: {parse_error}\n\n"
+                        f"Suggestions:\n"
+                        f"- Download a fresh demo from a recent competitive match\n"
+                        f"- Make sure it's CS2, not CS:GO\n"
+                        f"- Try a different demo file to isolate the issue"
+                    )
+
+            if demo_data is None:
+                raise Exception("Demo parsing returned no data")
 
             elapsed = time.time() - start_time
             logger.info(f"Demo parsed successfully in {elapsed:.2f} seconds")
