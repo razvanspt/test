@@ -117,19 +117,45 @@ class FaceItDemoParserService:
             bomb = []
             map_name = "Unknown"
 
-            # Try to extract kills
-            if hasattr(demo, 'kills') and demo.kills is not None:
-                kills = demo.kills
+            # Try to extract kills - handle both list and None cases
+            if hasattr(demo, 'kills'):
+                if demo.kills is not None:
+                    # Check if it's a list or DataFrame
+                    if isinstance(demo.kills, list):
+                        kills = demo.kills if len(demo.kills) > 0 else []
+                    else:
+                        # Might be a pandas DataFrame or other type
+                        try:
+                            kills = demo.kills.to_dict('records') if hasattr(demo.kills, 'to_dict') else []
+                        except:
+                            kills = []
+
+            if len(kills) > 0:
                 logger.info(f"✓ Extracted {len(kills)} kills from demo object")
 
             # Try to extract damages
-            if hasattr(demo, 'damages') and demo.damages is not None:
-                damages = demo.damages
+            if hasattr(demo, 'damages'):
+                if demo.damages is not None:
+                    if isinstance(demo.damages, list):
+                        damages = demo.damages if len(demo.damages) > 0 else []
+                    else:
+                        try:
+                            damages = demo.damages.to_dict('records') if hasattr(demo.damages, 'to_dict') else []
+                        except:
+                            damages = []
+
+            if len(damages) > 0:
                 logger.info(f"✓ Extracted {len(damages)} damage events")
 
             # Try to extract bomb events
             if hasattr(demo, 'bomb') and demo.bomb is not None:
-                bomb = demo.bomb
+                if isinstance(demo.bomb, list):
+                    bomb = demo.bomb
+                else:
+                    try:
+                        bomb = demo.bomb.to_dict('records') if hasattr(demo.bomb, 'to_dict') else []
+                    except:
+                        bomb = []
 
             # Try to get map name
             if hasattr(demo, 'map_name') and demo.map_name:
@@ -137,7 +163,8 @@ class FaceItDemoParserService:
 
             # Check if we got any useful data
             if len(kills) == 0:
-                logger.warning("No kills found in partial parse")
+                logger.warning("No kills found in partial parse - kills attribute is empty or not populated")
+                logger.info(f"Demo object attributes: {dir(demo)}")
                 return None
 
             return {
@@ -149,7 +176,7 @@ class FaceItDemoParserService:
             }
 
         except Exception as e:
-            logger.warning(f"Error recovery parsing failed: {e}")
+            logger.warning(f"Error recovery parsing failed: {e}", exc_info=True)
             return None
 
     def _parse_events_only(self, demo_file_path: Path) -> Dict[str, Any]:
