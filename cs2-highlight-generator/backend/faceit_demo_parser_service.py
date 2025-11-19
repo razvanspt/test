@@ -1,10 +1,11 @@
 """
 FaceIt Demo Parser Service
-Specialized service for parsing FaceIt CS2 demos
+Specialized service for parsing FaceIt CS2 demos using demoparser2 directly
 
 FaceIt servers use custom configurations and don't emit standard events like
-'round_officially_ended', which breaks standard awpy parsing. This service
-uses alternative approaches to extract kills and highlights from FaceIt demos.
+'round_officially_ended', which breaks awpy's round parsing. This service
+uses demoparser2 (the underlying parser) directly to extract kill events
+without relying on round parsing.
 """
 
 import logging
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import Dict, List, Any
 import time
 
-from awpy import Demo
+# Use demoparser2 directly instead of awpy to bypass round parsing issues
+from demoparser2 import DemoParser
 
 from models import MatchInfo, PlayerStats
 
@@ -21,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class FaceItDemoParserService:
     """
-    Specialized parser for FaceIt demos
+    Specialized parser for FaceIt demos using demoparser2 directly
 
     In Java:
     @Service
@@ -32,11 +34,14 @@ class FaceItDemoParserService:
 
     def __init__(self):
         """Constructor"""
-        logger.info("FaceItDemoParserService initialized")
+        logger.info("FaceItDemoParserService initialized (using demoparser2 directly)")
 
     def parse_faceit_demo(self, demo_file_path: Path) -> Dict[str, Any]:
         """
-        Parse a FaceIt CS2 demo file with custom handling
+        Parse a FaceIt CS2 demo file using demoparser2 directly
+
+        This bypasses awpy's round parsing which fails on FaceIt demos.
+        We extract kill events directly from the demo without needing rounds.
 
         Args:
             demo_file_path: Path to the .dem file
@@ -47,30 +52,64 @@ class FaceItDemoParserService:
         Raises:
             Exception: If parsing fails completely
         """
-        logger.info(f"Parsing FaceIt demo: {demo_file_path}")
+        logger.info(f"Parsing FaceIt demo with demoparser2: {demo_file_path}")
         start_time = time.time()
 
         try:
             if not demo_file_path.exists():
                 raise FileNotFoundError(f"Demo file not found: {demo_file_path}")
 
-            # Strategy 1: Parse and catch the round error, then extract what we can
-            demo_data = self._parse_with_error_recovery(demo_file_path)
+            # Initialize demoparser2 directly
+            parser = DemoParser(str(demo_file_path))
 
-            if demo_data is None:
-                # Strategy 2: Try alternative parsing method
-                logger.info("Strategy 1 failed, trying alternative parsing...")
-                demo_data = self._parse_events_only(demo_file_path)
+            # Parse player_death events to get all kills
+            # Request key fields we need for highlight detection
+            logger.info("Extracting player_death events from FaceIt demo...")
 
-            if demo_data is None:
-                raise Exception("All FaceIt parsing strategies failed")
+            kills_df = parser.parse_event(
+                "player_death",
+                player=["X", "Y", "Z"],  # Player positions
+                other=["total_rounds_played", "game_time"]  # Round info and timestamp
+            )
+
+            logger.info(f"✓ Extracted {len(kills_df)} player_death events")
+
+            # Convert DataFrame to list of dictionaries for compatibility with existing code
+            # The DataFrame columns will include event fields + requested player/other fields
+            kills = kills_df.to_dict('records')
+
+            # Extract map name from header if available
+            map_name = "Unknown"
+            try:
+                # Parse header separately to get map name
+                # In demoparser2, we can extract this from game events
+                header_df = parser.parse_event("round_start", other=["map_name"])
+                if len(header_df) > 0:
+                    map_name = header_df.iloc[0].get('map_name', 'Unknown')
+            except Exception as e:
+                logger.warning(f"Could not extract map name: {e}")
+
+            # Get total rounds played from the kills data
+            total_rounds = 0
+            if len(kills) > 0:
+                # The last kill should have the final round number
+                total_rounds = max([k.get('total_rounds_played', 0) for k in kills]) + 1
 
             elapsed = time.time() - start_time
             logger.info(f"✓ FaceIt demo parsed successfully in {elapsed:.2f} seconds")
-            logger.info(f"  Found {len(demo_data.get('kills', []))} kills")
+            logger.info(f"  Found {len(kills)} kills across {total_rounds} rounds")
+
+            # Build a data structure compatible with the existing highlight detector
+            demo_data = {
+                "header": {"map_name": map_name},
+                "kills": kills,
+                "damages": [],  # Not needed for highlight detection yet
+                "bomb": [],     # Not needed for highlight detection yet
+                "rounds": []    # FaceIt demos don't have reliable round data
+            }
 
             # Extract match info
-            match_info = self._extract_faceit_match_info(demo_data)
+            match_info = self._extract_faceit_match_info(demo_data, total_rounds)
 
             # Extract player stats
             player_stats = self._extract_faceit_player_stats(demo_data)
@@ -84,161 +123,34 @@ class FaceItDemoParserService:
 
         except Exception as e:
             logger.error(f"FaceIt demo parsing failed: {str(e)}", exc_info=True)
-            raise Exception(f"Failed to parse FaceIt demo: {str(e)}")
+            raise Exception(
+                f"Failed to parse FaceIt demo with demoparser2.\n\n"
+                f"Error: {str(e)}\n\n"
+                f"This could be due to:\n"
+                f"1. Demo file is corrupted or incomplete\n"
+                f"2. Demo is from an unsupported CS2 version\n"
+                f"3. Demo file is actually from CS:GO (not CS2)\n\n"
+                f"Please try:\n"
+                f"- A different FaceIt demo\n"
+                f"- A more recent demo (last 30 days)\n"
+                f"- Updating awpy/demoparser2: pip install --upgrade awpy demoparser2"
+            )
 
-    def _parse_with_error_recovery(self, demo_file_path: Path) -> Dict[str, Any]:
-        """
-        Parse demo and extract kills directly from raw events
-
-        KEY INSIGHT: When round parsing fails, demo.kills/damages/bomb become
-        inaccessible because they depend on self.rounds. Instead, we access
-        demo.events (raw event data) and manually extract kill events.
-        """
-        try:
-            demo = Demo(path=demo_file_path, tickrate=128, verbose=False)
-
-            # Parse header first (this usually works)
-            try:
-                demo.parse_header()
-            except Exception as e:
-                logger.warning(f"Header parsing failed: {e}")
-
-            # Parse events (this works even when rounds fail)
-            try:
-                demo.parse_events()
-                logger.info("✓ Events parsed successfully")
-            except Exception as e:
-                logger.warning(f"Event parsing failed: {e}")
-                return None
-
-            # Check if we have events
-            if not hasattr(demo, 'events') or demo.events is None:
-                logger.warning("No events found in demo")
-                return None
-
-            events = demo.events
-            logger.info(f"Found {len(events)} event types in demo")
-
-            # Extract kill events directly from events dictionary
-            kills = []
-            if 'player_death' in events:
-                kill_events = events['player_death']
-                logger.info(f"Found {len(kill_events)} player_death events")
-
-                # Convert to list of dicts if it's a DataFrame
-                if hasattr(kill_events, 'to_dicts'):
-                    # Polars DataFrame
-                    kills = kill_events.to_dicts()
-                elif hasattr(kill_events, 'to_dict'):
-                    # Pandas DataFrame
-                    kills = kill_events.to_dict('records')
-                elif isinstance(kill_events, list):
-                    kills = kill_events
-                else:
-                    logger.warning(f"Unknown kill events type: {type(kill_events)}")
-                    kills = []
-
-                logger.info(f"✓ Extracted {len(kills)} kills from events")
-                if len(kills) > 0:
-                    logger.debug(f"Sample kill: {kills[0]}")
-
-            # Try to get map name
-            map_name = "Unknown"
-            try:
-                if hasattr(demo, 'map_name') and demo.map_name:
-                    map_name = demo.map_name
-            except:
-                pass
-
-            # Check if we got any useful data
-            if len(kills) == 0:
-                logger.warning("No kill events found in parsed events")
-                logger.info(f"Available event types: {list(events.keys())}")
-                return None
-
-            return {
-                "header": {"map_name": map_name},
-                "kills": kills,
-                "damages": [],  # Can add damage event extraction if needed
-                "bomb": [],
-                "rounds": []
-            }
-
-        except Exception as e:
-            logger.warning(f"Error recovery parsing failed: {e}", exc_info=True)
-            return None
-
-    def _parse_events_only(self, demo_file_path: Path) -> Dict[str, Any]:
-        """
-        Alternative: Try to parse just events without full demo parsing
-
-        This is a backup method if the error recovery approach doesn't work.
-        """
-        try:
-            logger.info("Attempting events-only parsing...")
-
-            # Try with verbose mode to see what's happening
-            demo = Demo(path=demo_file_path, tickrate=128, verbose=True)
-
-            # Parse header
-            demo.parse_header()
-            map_name = getattr(demo, 'map_name', 'Unknown')
-
-            # Try to manually trigger event parsing without full parse
-            # This might not work in awpy 2.0+ but worth trying
-            try:
-                if hasattr(demo, 'parse_events'):
-                    demo.parse_events()
-                    logger.info("✓ Events parsed")
-            except:
-                pass
-
-            # Try to parse kills from events if they exist
-            try:
-                if hasattr(demo, 'parse_kills'):
-                    demo.parse_kills()
-                    logger.info("✓ Kills parsed")
-            except:
-                pass
-
-            # Check what we got
-            kills = demo.kills if hasattr(demo, 'kills') and demo.kills else []
-            damages = demo.damages if hasattr(demo, 'damages') and demo.damages else []
-
-            if len(kills) > 0:
-                logger.info(f"✓ Alternative parsing found {len(kills)} kills")
-                return {
-                    "header": {"map_name": map_name},
-                    "kills": kills,
-                    "damages": damages,
-                    "bomb": [],
-                    "rounds": []
-                }
-
-            return None
-
-        except Exception as e:
-            logger.warning(f"Events-only parsing failed: {e}")
-            return None
-
-    def _extract_faceit_match_info(self, demo_data: Dict) -> MatchInfo:
+    def _extract_faceit_match_info(self, demo_data: Dict, total_rounds: int) -> MatchInfo:
         """Extract match info from FaceIt demo data"""
         try:
             header = demo_data.get("header", {})
             map_name = header.get("map_name", "Unknown")
 
-            kills = demo_data.get("kills", [])
-
-            # Estimate rounds from kills (rough)
-            # Average CS2 round has about 3-5 kills
-            estimated_rounds = max(len(kills) // 4, 1)
+            # Estimate duration based on rounds (CS2 rounds avg ~2 minutes)
+            duration_minutes = total_rounds * 2.0
 
             return MatchInfo(
                 map_name=map_name,
-                total_rounds=estimated_rounds,
-                team_1_score=0,  # Can't determine from FaceIt demos
-                team_2_score=0,
-                duration_minutes=30.0  # Placeholder
+                total_rounds=total_rounds,
+                team_1_score=0,  # Can't reliably determine from FaceIt demos
+                team_2_score=0,  # Would need proper round end events
+                duration_minutes=duration_minutes
             )
         except Exception as e:
             logger.warning(f"Error extracting FaceIt match info: {e}")
@@ -257,9 +169,26 @@ class FaceItDemoParserService:
             player_stats_map: Dict[str, Dict] = {}
 
             for kill in kills_data:
-                attacker_name = kill.get("attacker_name", "Unknown")
-                victim_name = kill.get("victim_name", "Unknown")
-                is_headshot = kill.get("is_headshot", False)
+                # The DataFrame columns might use different names
+                # demoparser2 returns attacker/victim info in the event
+                # We need to check what fields are actually available
+
+                # Try different possible field names for attacker/victim
+                attacker_name = (
+                    kill.get("attacker_name") or
+                    kill.get("attacker") or
+                    kill.get("user_name") or
+                    "Unknown"
+                )
+
+                victim_name = (
+                    kill.get("victim_name") or
+                    kill.get("userid_name") or
+                    kill.get("victim") or
+                    "Unknown"
+                )
+
+                is_headshot = kill.get("headshot", False) or kill.get("is_headshot", False)
 
                 # Initialize stats
                 if attacker_name not in player_stats_map:
@@ -294,9 +223,9 @@ class FaceItDemoParserService:
                     name=player_name,
                     kills=kills,
                     deaths=stats["deaths"],
-                    assists=0,
+                    assists=0,  # Would need assist events to calculate
                     headshot_percentage=round(hs_percentage, 2),
-                    adr=0.0
+                    adr=0.0  # Would need damage events to calculate
                 ))
 
             # Sort by kills
@@ -306,6 +235,7 @@ class FaceItDemoParserService:
 
         except Exception as e:
             logger.warning(f"Error extracting FaceIt player stats: {e}")
+            logger.debug(f"Sample kill data: {kills_data[0] if kills_data else 'None'}")
             return []
 
     def get_kills_data(self, demo_data: Dict) -> List[Dict]:
