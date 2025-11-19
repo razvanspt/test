@@ -22,9 +22,10 @@ OUTPUT_DIR = BASE_DIR / "output"
 OUTPUT_DIR.mkdir(exist_ok=True)
 
 # === FILE UPLOAD CONFIGURATION ===
-# Maximum file size for demo uploads (100MB in bytes)
+# Maximum file size for demo uploads (200MB in bytes)
 # Similar to spring.servlet.multipart.max-file-size
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100MB
+# Full competitive matches (especially FaceIt) can be 100-150MB
+MAX_UPLOAD_SIZE = 200 * 1024 * 1024  # 200MB
 
 # Allowed file extensions
 ALLOWED_EXTENSIONS = {".dem"}  # Only CS2 demo files
