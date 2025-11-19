@@ -96,11 +96,76 @@ class DemoParserService:
                     "rounds": []  # awpy 2.0+ has different round structure
                 }
 
+            except KeyError as ke:
+                # Specific handling for missing event errors
+                parse_error = str(ke)
+                if "round_officially_ended" in parse_error:
+                    logger.warning(f"Demo missing 'round_officially_ended' event. Trying partial parse...")
+
+                    # Method 2: Parse without rounds (just get kills and damages)
+                    try:
+                        demo = Demo(
+                            path=demo_file_path,
+                            tickrate=128,
+                            verbose=False
+                        )
+
+                        # Parse header first
+                        demo.parse_header()
+
+                        # Manually parse just the events we need (kills, damages)
+                        # Skip round parsing which is causing the error
+                        demo.parse_events()  # Parse raw events
+
+                        # Extract kills and damages from events
+                        from awpy.parsers import kills as kills_parser
+                        from awpy.parsers import damages as damages_parser
+
+                        # Try to parse kills and damages directly from events
+                        kills_data = []
+                        damages_data = []
+
+                        try:
+                            if hasattr(demo, 'events') and demo.events:
+                                kills_data = kills_parser.parse_kills(demo.events) if hasattr(kills_parser, 'parse_kills') else []
+                                damages_data = damages_parser.parse_damages(demo.events) if hasattr(damages_parser, 'parse_damages') else []
+                        except Exception as parse_err:
+                            logger.warning(f"Could not parse kills/damages: {parse_err}")
+
+                        demo_data = {
+                            "header": {
+                                "map_name": getattr(demo, 'map_name', 'Unknown'),
+                            },
+                            "kills": kills_data,
+                            "damages": damages_data,
+                            "bomb": [],
+                            "rounds": []
+                        }
+
+                        logger.info("Successfully parsed demo with partial data (no rounds)")
+
+                    except Exception as e2:
+                        logger.error(f"Partial parsing also failed: {e2}")
+                        raise Exception(
+                            f"Failed to parse demo file. The demo is missing critical events.\n\n"
+                            f"This usually means:\n"
+                            f"1. **Demo is from CS:GO (not CS2)**: This tool ONLY supports CS2\n"
+                            f"2. **Demo is from very early CS2 beta**: Use a more recent demo\n"
+                            f"3. **Demo is corrupted or incomplete**\n\n"
+                            f"Error: {parse_error}\n\n"
+                            f"**What to do:**\n"
+                            f"→ Download a demo from a RECENT CS2 competitive match (2024+)\n"
+                            f"→ Make sure it's CS2, not CS:GO (CS2 released Sept 2023)\n"
+                            f"→ Try from: Watch → Your Matches in CS2 client"
+                        )
+                else:
+                    raise
+
             except Exception as e:
                 parse_error = str(e)
                 logger.warning(f"Standard parsing failed: {e}")
 
-                # Method 2: Try with different tickrate (some demos work better with this)
+                # Method 3: Last resort - try with different settings
                 try:
                     logger.info("Retrying with alternative settings...")
                     demo = Demo(
