@@ -11,6 +11,8 @@ import time
 import uuid
 from pathlib import Path
 from typing import List
+import platform
+import gc
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -76,6 +78,45 @@ faceit_parser_service = FaceItDemoParserService()
 highlight_detector_service = HighlightDetectorService()
 
 # === UTILITY FUNCTIONS ===
+
+def safe_delete_file(file_path: Path, max_retries: int = 5) -> bool:
+    """
+    Safely delete a file with retry logic for Windows file locking
+
+    On Windows, demo parsers (esp. Rust-based like demoparser2) can keep
+    file handles open even after the parser is deleted. This function
+    retries deletion with increasing delays to allow the OS to release locks.
+
+    Args:
+        file_path: Path to file to delete
+        max_retries: Maximum number of retry attempts
+
+    Returns:
+        True if file was deleted successfully, False otherwise
+    """
+    is_windows = platform.system() == "Windows"
+
+    for attempt in range(max_retries):
+        try:
+            if file_path.exists():
+                file_path.unlink()
+            return True
+        except PermissionError as e:
+            if attempt < max_retries - 1 and is_windows:
+                # On Windows, force GC and wait before retrying
+                gc.collect()
+                delay = 0.1 * (2 ** attempt)  # Exponential backoff: 0.1, 0.2, 0.4, 0.8, 1.6s
+                logger.warning(f"File locked, retrying in {delay}s (attempt {attempt + 1}/{max_retries})")
+                time.sleep(delay)
+            else:
+                logger.error(f"Failed to delete {file_path}: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"Error deleting {file_path}: {e}")
+            return False
+
+    return False
+
 
 def validate_demo_file(filename: str) -> bool:
     """
@@ -207,7 +248,7 @@ async def analyze_demo(file: UploadFile = File(...)):
                 if file_size > MAX_UPLOAD_SIZE:
                     logger.warning(f"File too large: {file_size} bytes")
                     # Delete partial file
-                    file_path.unlink(missing_ok=True)
+                    safe_delete_file(file_path)
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE / 1024 / 1024}MB"
@@ -233,7 +274,7 @@ async def analyze_demo(file: UploadFile = File(...)):
         except Exception as e:
             logger.error(f"Demo parsing failed: {str(e)}", exc_info=True)
             # Clean up file
-            file_path.unlink(missing_ok=True)
+            safe_delete_file(file_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to parse demo: {str(e)}"
@@ -355,7 +396,7 @@ async def analyze_faceit_demo(file: UploadFile = File(...)):
 
                 if file_size > MAX_UPLOAD_SIZE:
                     logger.warning(f"File too large: {file_size} bytes")
-                    file_path.unlink(missing_ok=True)
+                    safe_delete_file(file_path)
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"File too large. Maximum size is {MAX_UPLOAD_SIZE / 1024 / 1024}MB"
@@ -377,7 +418,7 @@ async def analyze_faceit_demo(file: UploadFile = File(...)):
 
         except Exception as e:
             logger.error(f"FaceIt demo parsing failed: {str(e)}", exc_info=True)
-            file_path.unlink(missing_ok=True)
+            safe_delete_file(file_path)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to parse FaceIt demo: {str(e)}"

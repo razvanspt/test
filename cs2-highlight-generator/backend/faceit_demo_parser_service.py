@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Dict, List, Any
 import time
+import gc  # For forcing garbage collection on Windows
 
 # Use demoparser2 directly - awpy's parse_events() fails on FaceIt demos
 from demoparser2 import DemoParser
@@ -98,6 +99,12 @@ class FaceItDemoParserService:
             # IMPORTANT: Delete parser to release file handle (Windows compatibility)
             # On Windows, the Rust-based parser keeps file handle open until GC
             del parser
+
+            # Force garbage collection to immediately release file handle
+            # This is critical on Windows where file handles persist until GC runs
+            gc.collect()
+
+            logger.info("Parser resources released (forced GC)")
 
             # Determine total rounds from kills data
             total_rounds = 0
